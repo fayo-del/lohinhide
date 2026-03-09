@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
-using System.Text.Json;
-using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.PrivateBranding;
 using MediaBrowser.Common.Configuration;
@@ -11,19 +9,20 @@ using MediaBrowser.Controller;
 using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Model.Plugins;
 using MediaBrowser.Model.Serialization;
-using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-
-// ─── Plugin Entry Point ───────────────────────────────────────────────────────
 
 namespace Jellyfin.Plugin.PrivateBranding;
 
+// ─── Configuration ────────────────────────────────────────────────────────────
+
 public class PluginConfiguration : BasePluginConfiguration
 {
-    public bool HideBrandingForUnauthenticated { get; set; } = true;
+    public bool Enabled { get; set; } = true;
 }
+
+// ─── Plugin ───────────────────────────────────────────────────────────────────
 
 public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 {
@@ -40,53 +39,53 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     public IEnumerable<PluginPageInfo> GetPages() => [];
 }
 
-// ─── Middleware ───────────────────────────────────────────────────────────────
+// ─── Filter ───────────────────────────────────────────────────────────────────
 
-public class PrivateBrandingMiddleware
+/// <summary>
+/// MVC resource filter that intercepts GET /Branding/Configuration before Jellyfin processes it.
+/// For unauthenticated requests, short-circuits with empty branding JSON.
+/// </summary>
+public class PrivateBrandingFilter : IAsyncResourceFilter
 {
-    private readonly RequestDelegate _next;
-
     private static readonly byte[] EmptyBranding = Encoding.UTF8.GetBytes(
-        JsonSerializer.Serialize(new
-        {
-            LoginDisclaimer = (string?)null,
-            CustomCss = (string?)null,
-            SplashscreenEnabled = false
-        })
+        """{"LoginDisclaimer":null,"CustomCss":null,"SplashscreenEnabled":false}"""
     );
 
-    public PrivateBrandingMiddleware(RequestDelegate next) => _next = next;
-
-    public async Task InvokeAsync(HttpContext context)
+    public async Task OnResourceExecutionAsync(ResourceExecutingContext context, ResourceExecutionDelegate next)
     {
-        if (context.Request.Method == HttpMethods.Get
-            && context.Request.Path.StartsWithSegments("/Branding/Configuration", StringComparison.OrdinalIgnoreCase)
-            && Plugin.Instance?.Configuration.HideBrandingForUnauthenticated == true
-            && !IsAuthenticated(context))
+        var request = context.HttpContext.Request;
+
+        bool isBrandingEndpoint =
+            request.Method == HttpMethods.Get &&
+            request.Path.StartsWithSegments("/Branding/Configuration", StringComparison.OrdinalIgnoreCase);
+
+        if (isBrandingEndpoint && Plugin.Instance?.Configuration.Enabled == true && !IsAuthenticated(request))
         {
-            context.Response.StatusCode = StatusCodes.Status200OK;
-            context.Response.ContentType = "application/json; charset=utf-8";
-            await context.Response.Body.WriteAsync(EmptyBranding);
+            var response = context.HttpContext.Response;
+            response.StatusCode = StatusCodes.Status200OK;
+            response.ContentType = "application/json; charset=utf-8";
+            await response.Body.WriteAsync(EmptyBranding);
+            // Short-circuit — do NOT call next()
             return;
         }
 
-        await _next(context);
+        await next();
     }
 
-    private static bool IsAuthenticated(HttpContext context)
+    private static bool IsAuthenticated(HttpRequest request)
     {
         foreach (var header in new[] { "Authorization", "X-Emby-Authorization" })
         {
-            if (context.Request.Headers.TryGetValue(header, out var value))
+            if (request.Headers.TryGetValue(header, out var val))
             {
-                var auth = value.ToString();
+                var auth = val.ToString();
                 if (auth.Contains("Token=", StringComparison.OrdinalIgnoreCase)
                     && !auth.Contains("Token=\"\"", StringComparison.OrdinalIgnoreCase))
                     return true;
             }
         }
 
-        return context.Request.Query.TryGetValue("ApiKey", out var key)
+        return request.Query.TryGetValue("ApiKey", out var key)
             && !string.IsNullOrWhiteSpace(key);
     }
 }
@@ -97,22 +96,10 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
 {
     public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
     {
-        serviceCollection.AddHostedService<PrivateBrandingStartup>();
+        // Register the filter globally so it runs before every controller action
+        serviceCollection.Configure<Microsoft.AspNetCore.Mvc.MvcOptions>(options =>
+        {
+            options.Filters.Add<PrivateBrandingFilter>();
+        });
     }
-}
-
-public class PrivateBrandingStartup : IHostedService
-{
-    private readonly IApplicationBuilder _appBuilder;
-
-    public PrivateBrandingStartup(IApplicationBuilder appBuilder)
-        => _appBuilder = appBuilder;
-
-    public Task StartAsync(CancellationToken cancellationToken)
-    {
-        _appBuilder.UseMiddleware<PrivateBrandingMiddleware>();
-        return Task.CompletedTask;
-    }
-
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }
