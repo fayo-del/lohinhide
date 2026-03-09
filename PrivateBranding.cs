@@ -14,6 +14,7 @@ using MediaBrowser.Model.Serialization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 // ─── Plugin Entry Point ───────────────────────────────────────────────────────
 
@@ -94,19 +95,24 @@ public class PrivateBrandingMiddleware
 
 public class PluginServiceRegistrator : IPluginServiceRegistrator
 {
-    public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost) { }
+    public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
+    {
+        serviceCollection.AddHostedService<PrivateBrandingStartup>();
+    }
 }
 
-public class PrivateBrandingStartup : IStartupTask
+public class PrivateBrandingStartup : IHostedService
 {
     private readonly IApplicationBuilder _appBuilder;
 
     public PrivateBrandingStartup(IApplicationBuilder appBuilder)
         => _appBuilder = appBuilder;
 
-    public Task ExecuteAsync(CancellationToken cancellationToken)
+    public Task StartAsync(CancellationToken cancellationToken)
     {
         _appBuilder.UseMiddleware<PrivateBrandingMiddleware>();
         return Task.CompletedTask;
     }
+
+    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }
